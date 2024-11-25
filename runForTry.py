@@ -1,84 +1,125 @@
 import numpy as np
 import pandas as pd
 from tensorflow.keras.models import load_model
-from tensorflow.keras import layers
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler
 
-# Definir SEBlock para que sea reconocido al cargar el modelo
+# Ruta a los datos (ajusta estas rutas a tu estructura de archivos)
+train_data_path = './data/train.csv'  # Datos de entrenamiento
+# Información adicional de las tiendas
+store_data_path = './data/store_cleaned.csv'
 
+# Cargar los datos
+train = pd.read_csv(train_data_path)
+store = pd.read_csv(store_data_path)
 
-class SEBlock(layers.Layer):
-    def __init__(self, reduction_ratio=16, **kwargs):
-        super(SEBlock, self).__init__(**kwargs)
-        self.reduction_ratio = reduction_ratio
+# Preprocesar los datos del dataset `store`
+store['CompetitionDistance'].fillna(
+    store['CompetitionDistance'].median(), inplace=True)
+store['CompetitionOpenSinceMonth'].fillna(1, inplace=True)
+store['CompetitionOpenSinceYear'].fillna(
+    store['CompetitionOpenSinceYear'].median(), inplace=True)
+store['Promo2SinceWeek'].fillna(1, inplace=True)
+store['Promo2SinceYear'].fillna(
+    store['Promo2SinceYear'].median(), inplace=True)
 
-    def build(self, input_shape):
-        num_channels = input_shape[-1]
-        self.global_average_pooling = layers.GlobalAveragePooling1D()
-        self.dense1 = layers.Dense(
-            num_channels // self.reduction_ratio, activation='relu')
-        self.dense2 = layers.Dense(num_channels, activation='sigmoid')
-        self.reshape = layers.Reshape((1, num_channels))
-        self.multiply = layers.Multiply()
+categorical_columns = ['StoreType', 'Assortment', 'PromoInterval']
+categorical_columns = [
+    col for col in categorical_columns if col in store.columns]
 
-    def call(self, inputs):
-        squeeze = self.global_average_pooling(inputs)
-        excite = self.dense1(squeeze)
-        excite = self.dense2(excite)
-        excite = self.reshape(excite)
-        output = self.multiply([inputs, excite])
-        return output
+if categorical_columns:
+    store = pd.get_dummies(store, columns=categorical_columns, drop_first=True)
 
-    def get_config(self):
-        config = super(SEBlock, self).get_config()
-        config.update({"reduction_ratio": self.reduction_ratio})
-        return config
+# Merge de store con train
+train['Date'] = pd.to_datetime(train['Date'], dayfirst=True)
+train['Month'] = train['Date'].dt.month
+train['Year'] = train['Date'].dt.year
+train = train.merge(store, on='Store', how='left')
 
+# Eliminar filas donde Sales es 0
+train = train[train['Sales'] > 0]
 
-# Cargar el modelo incluyendo SEBlock como objeto personalizado
-model = load_model("best_model.h5", custom_objects={"SEBlock": SEBlock})
+# Crear nuevas características
+train['Promo_Customers'] = train['Promo'] * train['Customers']
+train['Open_Customers'] = train['Open'] * train['Customers']
 
-# Definir las 12 columnas que el modelo espera como entrada
+# Seleccionar columnas finales
+columns_to_keep = [
+    'DayOfWeek', 'Customers', 'Open', 'Promo', 'SchoolHoliday', 'Month',
+    'Promo_Customers', 'Open_Customers', 'Sales'
+]
+
+processed_categorical_columns = [
+    col for col in train.columns if col.startswith(('StoreType', 'Assortment', 'PromoInterval'))
+]
+columns_to_keep.extend(processed_categorical_columns)
+
+state_holiday_columns = [
+    col for col in train.columns if col.startswith('StateHoliday')]
+columns_to_keep.extend(state_holiday_columns)
+
+columns_to_keep = [col for col in columns_to_keep if col in train.columns]
+train = train[columns_to_keep]
+
+# Separar características (X) y variable objetivo (y)
+X_train = train.drop(['Sales'], axis=1)
+y_train = train['Sales']
+
+# Definir las columnas que el modelo espera como entrada
 expected_columns = [
-    "Store", "CompetitionDistance", "CompetitionOpenSinceMonth",
-    "CompetitionOpenSinceYear", "Promo2", "Promo2SinceWeek",
-    "Promo2SinceYear", "StoreType_b", "StoreType_c",
-    "StoreType_d", "Assortment_b", "Assortment_c"
+    'DayOfWeek', 'Customers', 'Open', 'Promo', 'SchoolHoliday', 'Month',
+    'Promo_Customers', 'Open_Customers', 'StoreType_b', 'StoreType_c',
+    'StoreType_d', 'Assortment_b', 'Assortment_c',
+    'PromoInterval_Jan,Apr,Jul,Oct', 'PromoInterval_Mar,Jun,Sept,Dec',
+    'PromoInterval_NoPromo', 'StateHoliday'
 ]
 
 # Definir las columnas que necesitan escalado
-scaled_columns = ["CompetitionDistance", "CompetitionOpenSinceMonth",
-                  "CompetitionOpenSinceYear", "Promo2SinceWeek", "Promo2SinceYear"]
+scaled_columns = ['Customers', 'Promo_Customers', 'Open_Customers']
 
 # Configurar un escalador
-scaler = StandardScaler()
+scaler = MinMaxScaler()
+
+# Ajustar el escalador con los datos de entrenamiento
+scaler.fit(X_train[scaled_columns])
 
 # Pedir al usuario los valores necesarios con el formato esperado
-
-
 def solicitar_datos():
     sample_input = {
-        'Store': int(input("Ingrese el número de tienda (Entero) (Store): ")),
-        'CompetitionDistance': float(input("Ingrese la distancia a la competencia (Número decimal, en metros) (CompetitionDistance): ")),
-        'CompetitionOpenSinceMonth': float(input("Mes en que abrió la competencia (Número decimal, 1 a 12) (CompetitionOpenSinceMonth): ")),
-        'CompetitionOpenSinceYear': int(input("Año en que abrió la competencia (Entero, ej. 2010) (CompetitionOpenSinceYear): ")),
-        'Promo2': int(input("¿La tienda tiene una promoción continua? (1 para sí, 0 para no) (Promo2): ")),
-        'Promo2SinceWeek': float(input("Semana en que comenzó Promo2 (Número decimal, 1 a 52) (Promo2SinceWeek): ")),
-        'Promo2SinceYear': float(input("Año en que comenzó Promo2 (Número decimal, ej. 2010) (Promo2SinceYear): ")),
+        'DayOfWeek': int(input("Día de la semana (1 a 7) (DayOfWeek): ")),
+        'Customers': float(input("Número de clientes esperados (decimal) (Customers): ")),
+        'Open': int(input("¿La tienda está abierta? (1 para sí, 0 para no) (Open): ")),
+        'Promo': int(input("¿Hay una promoción activa? (1 para sí, 0 para no) (Promo): ")),
+        'SchoolHoliday': int(input("¿Es un día festivo escolar? (1 para sí, 0 para no) (SchoolHoliday): ")),
+        'Month': int(input("Mes del año (1 a 12) (Month): ")),
+        'Promo_Customers': float(input("Clientes afectados por la promoción (decimal) (Promo_Customers): ")),
+        'Open_Customers': float(input("Clientes afectados por la apertura (decimal) (Open_Customers): ")),
         'StoreType_b': int(input("¿Es tienda de tipo B? (1 para sí, 0 para no) (StoreType_b): ")),
         'StoreType_c': int(input("¿Es tienda de tipo C? (1 para sí, 0 para no) (StoreType_c): ")),
         'StoreType_d': int(input("¿Es tienda de tipo D? (1 para sí, 0 para no) (StoreType_d): ")),
         'Assortment_b': int(input("¿Tiene surtido de tipo B? (1 para sí, 0 para no) (Assortment_b): ")),
-        'Assortment_c': int(input("¿Tiene surtido de tipo C? (1 para sí, 0 para no) (Assortment_c): "))
+        'Assortment_c': int(input("¿Tiene surtido de tipo C? (1 para sí, 0 para no) (Assortment_c): ")),
+        'PromoInterval_Jan,Apr,Jul,Oct': int(input("¿Promoción en Enero, Abril, Julio, Octubre? (1 para sí, 0 para no): ")),
+        'PromoInterval_Mar,Jun,Sept,Dec': int(input("¿Promoción en Marzo, Junio, Septiembre, Diciembre? (1 para sí, 0 para no): ")),
+        'PromoInterval_NoPromo': int(input("¿No hay promoción? (1 para sí, 0 para no): ")),
+        'StateHoliday': int(input("¿Es un día festivo estatal? (1 para sí, 0 para no) (StateHoliday): "))
     }
     return pd.DataFrame([sample_input])
 
 # Función de preprocesamiento y predicción
+def predecir_ventas(model, scaler, sample_input_df):
+    """
+    Preprocesa los datos ingresados y realiza una predicción con el modelo cargado.
 
+    Args:
+        model (keras.Model): Modelo cargado para realizar predicciones.
+        scaler (MinMaxScaler): Escalador ajustado a las características que requieren normalización.
+        sample_input_df (DataFrame): Datos de entrada proporcionados por el usuario.
 
-def predecir_ventas(model, sample_input_df):
+    Returns:
+        float: Predicción de ventas.
+    """
     # Escalar las columnas necesarias
-    sample_input_scaled_part = scaler.fit_transform(
+    sample_input_scaled_part = scaler.transform(
         sample_input_df[scaled_columns])
 
     # Crear DataFrame con las columnas escaladas
@@ -92,15 +133,19 @@ def predecir_ventas(model, sample_input_df):
     # Filtrar solo las columnas esperadas en el modelo
     sample_input_final = sample_input_final[expected_columns]
 
-    # Redimensionar la entrada para la compatibilidad con CNN
-    sample_input_cnn = np.expand_dims(sample_input_final.values, axis=2)
+    # Redimensionar la entrada para la compatibilidad con LSTM
+    sample_input_rnn = np.expand_dims(sample_input_final.values, axis=1)
 
     # Realizar la predicción
-    prediction = model.predict(sample_input_cnn)
+    prediction = model.predict(sample_input_rnn)
     return prediction[0][0]
 
 
+# Cargar el modelo
+model_path = './final_rnn_model_v2.h5'
+model = load_model(model_path)
+
 # Obtener datos del usuario y hacer la predicción
 sample_input_df = solicitar_datos()
-ventas_predichas = predecir_ventas(model, sample_input_df)
+ventas_predichas = predecir_ventas(model, scaler, sample_input_df)
 print(f"\nPredicción de ventas para la tienda: {ventas_predichas:.2f}")
